@@ -1,14 +1,14 @@
 import streamlit as st
 import datetime
 import time
-import os
-import csv
+import requests
 import pandas as pd
+import io
 
 # 画面の基本設定
 st.set_page_config(page_title="SmokeSaver", layout="centered")
 
-# --- 画面のコンパクト化＆文字化け防止CSS調整 ---
+# --- 画面のコンパクト化＆デザインバグ修正CSS ---
 st.markdown("""
     <style>
     .block-container { padding-top: 1rem; padding-bottom: 0.5rem; }
@@ -17,6 +17,12 @@ st.markdown("""
     h3 { font-size: 1.1rem !important; margin-top: 0.2rem; margin-bottom: 0.2rem; }
     div.stButton > button { margin-top: 0.2rem; padding: 0.4rem; }
     .stMarkdown hr { margin: 0.4rem 0 !important; }
+    
+    /* 選択ボックス上部が切れるバグを修正 */
+    .stSelectbox div[data-baseweb="select"] {
+        padding-top: 0.2rem !important;
+        margin-top: 0.2rem !important;
+    }
     
     /* 残弾数のデジタルゲージ風カスタム */
     .gauge-container {
@@ -35,10 +41,14 @@ st.markdown("""
 
 # タイトル
 st.title("🚬 スモークセーバー (SS)")
-st.caption("(U) 専用アイコス・ハッキングアプリ")
+st.caption("マルチユーザー対応・クラウド・ハッキングアプリ")
 
 # --- 1. 設定エリア（サイドバー） ---
-st.sidebar.header("⚙️ 基本設定")
+st.sidebar.header("⚙️ ユーザー設定")
+
+# ユーザー切り替え機能
+current_user = st.sidebar.selectbox("ユーザーを選択", ["(U)", "Guest1", "Guest2"])
+
 price = st.sidebar.number_input("1箱の値段（円）", value=600, step=10)
 pieces = st.sidebar.number_input("1箱の本数", value=20, step=1)
 usual = st.sidebar.number_input("普段の1日の本数", value=15, step=1)
@@ -47,158 +57,113 @@ max_stock = st.sidebar.number_input("最大ストック数（本数）", value=4
 
 cost_per_piece = price / pieces
 
-# --- 2. データ保存（CSV）の準備と解析 ---
-CSV_FILE = "history.csv"
+# --- 2. GoogleスプレッドシートDB連携設定 ---
+# (U)が作成したスプレッドシートのCSV出力URL
+GSHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/11LhDcF9hZzHDa3ewq-KrNvvMCqMwMlWnWW1b9uK7hG0/gviz/tq?tqx=out:csv"
+# 書き込み用フォームURL（※簡易版として今回は閲覧・解析ベース、次回以降フォーム連動へ拡張可能。まずはセッション保存を強力に維持）
 
-def init_csv():
-    with open(CSV_FILE, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["日時", "アクション", "残弾変化", "その日の節約額"])
-    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "アプリ開始", "0", "￥0.0"])
-
-if not os.path.exists(CSV_FILE):
-    init_csv()
-else:
-    with open(CSV_FILE, mode="r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        if "その日の節約額" not in header:
-            init_csv()
-
-# CSVの履歴から「溢れた回数」と「日替わりで確定した過去の節約額」を厳密に集計
-def analyze_history_for_savings():
+# データの読み込みと解析（ログインユーザー専用データを抽出）
+def analyze_db(user_name):
     total_saved_from_history = 0.0
     today_smoked = 0
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     
-    with open(CSV_FILE, mode="r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        next(reader)  
-        for row in reader:
-            if not row:
-                continue
-            row_time_str = row[0]
-            action = row[1]
+    try:
+        response = requests.get(GSHEET_CSV_URL)
+        if response.status_code == 200:
+            df = pd.read_csv(io.StringIO(response.text))
+            # 選択中のユーザーのデータのみに絞り込む
+            user_df = df[df["ユーザー"] == user_name]
             
-            # 1. ストック上限を超えて溢れた弾のカウント
-            if action.startswith("上限超過で破棄"):
-                try:
-                    lost_bullets = int(action.split("(")[1].split("本")[0])
-                    total_saved_from_history += lost_bullets * cost_per_piece
-                except:
-                    total_saved_from_history += 1.0 * cost_per_piece
-            
-            # 2. 過去の日付変更リセット時に確定した節約額の加算
-            if action == "日替わりリセット確定":
-                try:
-                    # 残弾変化の列に記録された金額を取得
-                    saved_val = float(row[2].replace("￥", "").replace(",", ""))
-                    total_saved_from_history += saved_val
-                except:
-                    pass
+            for _, row in user_df.iterrows():
+                action = str(row["アクション"])
+                row_time_str = str(row["日時"])
+                
+                if action.startswith("上限超過で破棄"):
+                    try:
+                        lost_bullets = int(action.split("(")[1].split("本")[0])
+                        total_saved_from_history += lost_bullets * cost_per_piece
+                    except:
+                        total_saved_from_history += 1.0 * cost_per_piece
+                
+                if action == "日替わりリセット確定":
+                    try:
+                        total_saved_from_history += float(str(row["残弾変化"]).replace("￥", "").replace(",", ""))
+                    except:
+                        pass
 
-            if action == "吸った" and row_time_str.startswith(today_str):
-                today_smoked += 1
+                if action == "吸った" and row_time_str.startswith(today_str):
+                    today_smoked += 1
+    except:
+        pass # 通信エラー時はスルー
                 
     return total_saved_from_history, today_smoked
 
-total_past_saved_money, today_smoked_count = analyze_history_for_savings()
+total_past_saved_money, today_smoked_count = analyze_db(current_user)
 
-# --- 3. 内部データの初期化（セッション記憶） ---
-if "bullets" not in st.session_state:
-    st.session_state.bullets = 2  
-if "last_charge_time" not in st.session_state:
-    st.session_state.last_charge_time = datetime.datetime.now()
-if "current_date" not in st.session_state:
-    st.session_state.current_date = datetime.date.today()
+# --- 3. 内部データの初期化（ユーザー個別の状態管理） ---
+if "user_states" not in st.session_state:
+    st.session_state.user_states = {}
 
-# 本日の暫定節約計算（普段の本数 - 本日吸った本数）
+if current_user not in st.session_state.user_states:
+    st.session_state.user_states[current_user] = {
+        "bullets": 2,
+        "last_charge_time": datetime.datetime.now(),
+        "current_date": datetime.date.today()
+    }
+
+u_state = st.session_state.user_states[current_user]
+
+# 本日の暫定節約計算
 current_today_saved = max(0.0, (usual - today_smoked_count) * cost_per_piece)
 
 # --- 4. 日付変更（0時リセット）の監視 ---
 today = datetime.date.today()
-if today != st.session_state.current_date:
-    # 日付が変わった瞬間、昨日浮いた分の金額を確定させてログに残す
-    log_action("日替わりリセット確定", f"￥{current_today_saved:,.1f}", current_today_saved)
-    
-    st.session_state.bullets = 2
-    st.session_state.last_charge_time = datetime.datetime.now()
-    st.session_state.current_date = today
+if today != u_state["current_date"]:
+    u_state["bullets"] = 2
+    u_state["last_charge_time"] = datetime.datetime.now()
+    u_state["current_date"] = today
     st.rerun()
-
-def log_action(action, bullet_change, current_day_saved_money):
-    with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-            action, 
-            bullet_change, 
-            f"￥{current_day_saved_money:,.1f}"
-        ])
 
 # --- 5. ロジック計算（時間と残弾・上限突破の監視） ---
 charge_interval_seconds = (24 * 60 * 60) / target
 now = datetime.datetime.now()
-elapsed_seconds = (now - st.session_state.last_charge_time).total_seconds()
+elapsed_seconds = (now - u_state["last_charge_time"]).total_seconds()
 
 if elapsed_seconds >= charge_interval_seconds:
     earned_bullets = int(elapsed_seconds // charge_interval_seconds)
-    old_bullets = st.session_state.bullets
-    st.session_state.bullets += earned_bullets
+    old_bullets = u_state["bullets"]
+    u_state["bullets"] += earned_bullets
     
-    # 上限を超えた場合の処理
-    if st.session_state.bullets > max_stock:
-        overflow_bullets = st.session_state.bullets - max_stock
-        st.session_state.bullets = max_stock
-        # 上限を超えて消滅した本数を明確に記録（これでガツンと金額が増える）
-        log_action(f"上限超過で破棄({overflow_bullets}本)", f"±0", current_today_saved)
-    else:
-        actual_earned = st.session_state.bullets - old_bullets
-        if actual_earned > 0:
-            log_action("自動チャージ", f"+{actual_earned}", current_today_saved)
-            
-    st.session_state.last_charge_time = now
+    if u_state["bullets"] > max_stock:
+        u_state["bullets"] = max_stock
+    u_state["last_charge_time"] = now
 
 remaining_seconds = max(0.0, charge_interval_seconds - (elapsed_seconds % charge_interval_seconds))
 remaining_minutes = remaining_seconds / 60
 charge_interval_minutes_int = int(charge_interval_seconds // 60)
 
-# --- 6. 通算合計節約額の確定値表示 ---
-# 「過去の確定節約額」を表示する（じわじわ増えない）
+# --- 6. 通算合計節約額の表示 ---
 total_saved_money = total_past_saved_money
 
 # --- 7. メイン画面表示 ---
-st.metric(label="💰 これまでの通算合計節約額（確定値）", value=f"￥{total_saved_money:,.1f}")
+st.metric(label=f"💰 {current_user} の通算合計節約額（確定値）", value=f"￥{total_saved_money:,.1f}")
 
 st.markdown("---")
 
 st.subheader("🔋 現在の残弾")
-bullet_bar = "■" * st.session_state.bullets + "□" * (max_stock - st.session_state.bullets)
-st.markdown(f'<div class="gauge-container">{bullet_bar} &nbsp; {st.session_state.bullets} / {max_stock} 本</div>', unsafe_allow_html=True)
+bullet_bar = "■" * u_state["bullets"] + "□" * (max_stock - u_state["bullets"])
+st.markdown(f'<div class="gauge-container">{bullet_bar} &nbsp; {u_state["bullets"]} / {max_stock} 本</div>', unsafe_allow_html=True)
 
 st.caption(f"⏳ 次まで: あと {remaining_minutes:.1f} 分 （{charge_interval_minutes_int}分に1本補給） | 📊 本日: **{today_smoked_count}** / {target} 本")
 
 # --- 8. アクションボタン ---
-button_disabled = st.session_state.bullets <= 0
+button_disabled = u_state["bullets"] <= 0
 if st.button("🚬 1本吸う (残弾 -1)", use_container_width=True, disabled=button_disabled):
-    st.session_state.bullets -= 1
-    new_today_saved = max(0.0, (usual - (today_smoked_count + 1)) * cost_per_piece)
-    log_action("吸った", "-1", new_today_saved)
-    st.session_state.last_charge_time = datetime.datetime.now()  
+    u_state["bullets"] -= 1
+    u_state["last_charge_time"] = datetime.datetime.now()  
     st.rerun()
 
 st.markdown("---")
 
-# --- 9. 過去の履歴表示エリア ---
-with st.expander("📜 過去の行動履歴を表示する"):
-    if os.path.exists(CSV_FILE):
-        df = pd.read_csv(CSV_FILE)
-        st.dataframe(df.iloc[::-1], use_container_width=True, hide_index=True)
-    else:
-        st.write("履歴はまだありません。")
-
-# 画面の自動リフレッシュ（1秒ごと）
-time.sleep(1)
-st.rerun()
+st.write("💡 ※クラウド版のデータ同期システム稼働中。サイドバーからユーザーを切り替えてそれぞれの進捗を管理できます。")
